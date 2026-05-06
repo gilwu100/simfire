@@ -6,9 +6,8 @@ from typing import Any, Optional, Tuple
 import matplotlib.pyplot as plt
 import numpy as np
 import pygame
-from reportlab.graphics import renderPM
-from svglib.svglib import svg2rlg
-from wurlitzer import pipes
+
+from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
 
 from ..enums import BURNED_RGB_COLOR, BurnStatus, SpriteLayer
 from ..utils.layers import FuelLayer, HistoricalLayer, TopographyLayer
@@ -164,33 +163,21 @@ class Terrain(pygame.sprite.Sprite):
 
         plt.axis("off")
 
-        # Save the figure as a vector graphic to get just the image (no axes,
-        # ticks, figure edges, etc.)
-        # Then load it, resize, and convert to numpy
-        # Added `with pipes():` to get rid of 'colinear!' message output by C library
-        # in svglib:
-        # https://github.com/Distrotech/reportlab/search?q=colinear%21
-        with pipes():
-            with tempfile.NamedTemporaryFile(suffix=".svg") as out_img_path:
-                fig.savefig(out_img_path.name, bbox_inches="tight", pad_inches=0)
+        # --- REPLACED BLOCK ONLY ---
+        canvas = FigureCanvas(fig)
 
-                drawing = svg2rlg(out_img_path.name)
+        fig.set_size_inches(
+            image.shape[1] / fig.dpi,
+            image.shape[0] / fig.dpi
+        )
 
-                # Resize the SVG drawing
-                scale_x = image.shape[1] / drawing.width
-                scale_y = image.shape[0] / drawing.height
-                drawing.width = drawing.width * scale_x
-                drawing.height = drawing.height * scale_y
-                drawing.scale(scale_x, scale_y)
-                # Convert to Pillow
-                # The fmt argument will display the levels as whole numbers (otherwise
-                # sending stdout to devnull to avoid the annoying `x_order_1: collinear!`
-                sys.stdout = open(os.devnull, "w")
-                out_img_pil = renderPM.drawToPIL(drawing)
-                sys.stdout = sys.__stdout__
+        canvas.draw()
+
+        width, height = canvas.get_width_height()
+        buf = np.frombuffer(canvas.tostring_rgb(), dtype=np.uint8)
+        out_img = buf.reshape((height, width, 3))
+
         plt.close(fig)
-        # Slice the alpha channel off
-        out_img = np.array(out_img_pil, dtype=np.uint8)[..., :3]
 
         return out_img
 
