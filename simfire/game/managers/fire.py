@@ -23,6 +23,8 @@ from ..sprites import Fire, Terrain
 
 log = create_logger(__name__)
 
+PointType = Tuple[int, int]
+InitPosType = Union[PointType, Sequence[PointType]]
 NewLocsType = Tuple[Tuple[int, int], ...]
 
 SpriteParamsType = Tuple[
@@ -55,7 +57,7 @@ class FireManager:
 
     def __init__(
         self,
-        init_pos: Tuple[int, int],
+        init_pos: InitPosType,
         fire_size: int,
         max_fire_duration: int,
         attenuate_line_ros: bool = True,
@@ -69,7 +71,8 @@ class FireManager:
         initial fire.
 
         Arguments:
-            init_pos: The (x,y) location of the initial fire
+            init_pos: The (x,y) location of the initial fire, or a sequence of
+                      (x, y) locations for multiple initial fires
             fire_size: The (n,n) pixel size of the fire sprite. Note that
                        the sprite pixel size does not affect which tiles/pixels
                        are actually burning. This is for display purposes only.
@@ -91,16 +94,52 @@ class FireManager:
         Returns:
             None
         """
-        self.init_pos = init_pos
+        self.init_pos = self._normalize_init_pos(init_pos)
         self.fire_size = fire_size
         self.max_fire_duration = max_fire_duration
         self.attenuate_line_ros = attenuate_line_ros
         self.headless = headless
         self.diagonal_spread = diagonal_spread
 
-        init_fire = Fire(self.init_pos, self.fire_size, headless=self.headless)
-        self.sprites: List[Fire] = [init_fire]
-        self.durations: List[int] = [0]
+        self.sprites: List[Fire] = [
+            Fire(pos, self.fire_size, headless=self.headless) for pos in self.init_pos
+        ]
+        self.durations: List[int] = [0] * len(self.sprites)
+
+    @staticmethod
+    def _normalize_init_pos(init_pos: InitPosType) -> List[PointType]:
+        """
+        Normalize the input initial fire position(s) into a list of (x, y) tuples.
+
+        Arguments:
+            init_pos: Either a single (x, y) tuple or a sequence of (x, y) tuples
+
+        Returns:
+            A list of (x, y) tuples representing the initial ignition points
+        """
+        if (
+            isinstance(init_pos, tuple)
+            and len(init_pos) == 2
+            and all(isinstance(v, (int, np.integer)) for v in init_pos)
+        ):
+            return [(int(init_pos[0]), int(init_pos[1]))]
+
+        normalized: List[PointType] = []
+        for pos in init_pos:
+            if not (
+                isinstance(pos, (tuple, list))
+                and len(pos) == 2
+                and all(isinstance(v, (int, np.integer)) for v in pos)
+            ):
+                raise ValueError(
+                    "init_pos must be either a tuple (x, y) or a sequence of such tuples"
+                )
+            normalized.append((int(pos[0]), int(pos[1])))
+
+        if len(normalized) == 0:
+            raise ValueError("init_pos must contain at least one ignition point")
+
+        return normalized
 
     def update(self, fire_map: np.ndarray) -> Any:
         """
@@ -294,7 +333,7 @@ class RothermelFireManager(FireManager):
 
     def __init__(
         self,
-        init_pos: Tuple[int, int],
+        init_pos: InitPosType,
         fire_size: int,
         max_fire_duration: int,
         pixel_scale: float,
@@ -313,7 +352,8 @@ class RothermelFireManager(FireManager):
         initial fire.
 
         Arguments:
-            init_pos: The (x,y) location of the initial fire
+            init_pos: The (x,y) location of the initial fire, or a sequence of
+                      (x, y) locations for multiple initial fires
             fire_size: The (n,n) pixel size of the fire sprite. Note that
                        the sprite pixel size does not affect which tiles/pixels
                        are actually burning. This is for display purposes only.
@@ -742,7 +782,7 @@ class RothermelFireManager(FireManager):
         x_coords = new_loc_x.astype(int)
 
         # Create a rate_of_spread variable that takes the same shape as self.burn_amounts
-        # and fire_map. 
+        # and fire_map.
         rate_of_spread = np.zeros_like(self.burn_amounts, dtype=np.float32)
         # Accumulate contributions from all source->destination spread attempts.
         # Equivalent to:
@@ -778,7 +818,7 @@ class ConstantSpreadFireManager(FireManager):
 
     def __init__(
         self,
-        init_pos: Tuple[int, int],
+        init_pos: InitPosType,
         fire_size: int,
         max_fire_duration: int,
         rate_of_spread: int,
@@ -789,7 +829,8 @@ class ConstantSpreadFireManager(FireManager):
         initial fire.
 
         Arguments:
-            init_pos: The (x,y) location of the initial fire
+            init_pos: The (x,y) location of the initial fire, or a sequence of
+                      (x, y) locations for multiple initial fires
             fire_size: The (n,n) pixel size of the fire sprite. Note that
                        the sprite pixel size does not affect which tiles/pixels
                        are actually burning. This is for display purposes only.

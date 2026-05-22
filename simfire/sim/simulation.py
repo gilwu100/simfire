@@ -68,7 +68,7 @@ class Simulation(ABC):
             A tuple of the following:
                 - The Burned/Unburned/ControlLine pixel map (`self.fire_map`). Values
                   range from [0, 6] (see simfire/enums.py:BurnStatus).
-                - A boolean indicating whether the simulation has reached the end.
+                - A boolean indicating whether the simulation is still active/running.
         """
         pass
 
@@ -517,7 +517,7 @@ class FireSimulation(Simulation):
             A tuple of the following:
                 - The Burned/Unburned/ControlLine pixel map (`self.fire_map`). Values
                   range from [0, 6] (see simfire/enums.py:BurnStatus).
-                - A boolean indicating whether the simulation has reached the end.
+                - A boolean indicating whether the simulation is still active/running.
         """
         if isinstance(time, str):
             # Convert the string to a number of minutes
@@ -526,6 +526,8 @@ class FireSimulation(Simulation):
             total_updates = round(time / self.config.simulation.update_rate)
         elif isinstance(time, int):
             total_updates = time
+        else:
+            raise TypeError("time must be either a string duration or an integer step count")
 
         num_updates = 0
         self.elapsed_time = self.fire_manager.elapsed_time
@@ -555,15 +557,29 @@ class FireSimulation(Simulation):
     def _create_fire_map(self) -> None:
         """
         Resets the `self.fire_map` attribute to entirely `BurnStatus.UNBURNED`,
-        except for self.config.fire.fire_initial_position, which is set to
+        except for `self.config.fire.fire_initial_position`, which may be a
+        single ignition point or multiple ignition points, all of which are set to
         `BurnStatus.BURNING`.
         """
         self.fire_map = np.full(
             self.config.area.screen_size,
             BurnStatus.UNBURNED,
         )
-        x, y = self.config.fire.fire_initial_position
-        self.fire_map[y, x] = BurnStatus.BURNING
+
+        init_pos = self.config.fire.fire_initial_position
+
+        # Single ignition point
+        if (
+            isinstance(init_pos, tuple)
+            and len(init_pos) == 2
+            and all(isinstance(v, (int, np.integer)) for v in init_pos)
+        ):
+            x, y = init_pos
+            self.fire_map[y, x] = BurnStatus.BURNING
+        else:
+            # Multiple ignition points
+            for x, y in init_pos:
+                self.fire_map[y, x] = BurnStatus.BURNING
 
     def _create_agent_positions(self) -> None:
         """
@@ -743,7 +759,8 @@ class FireSimulation(Simulation):
             self.config.reset_wind(direction_seed=seeds["wind_direction"])
             success = True
         if "fire_initial_position" in keys:
-            self.config.reset_fire(seeds["fire_initial_position"])
+            self.config.reset_fire(seed=seeds["fire_initial_position"])
+            success = True
 
         valid_keys = list(self.get_seeds().keys())
         for key in keys:
@@ -758,12 +775,15 @@ class FireSimulation(Simulation):
                 success = False
         return success
 
-    def set_fire_initial_position(self, pos: Tuple[int, int]) -> None:
+    def set_fire_initial_position(
+        self, pos: Union[Tuple[int, int], List[Tuple[int, int]]]
+    ) -> None:
         """
-        Manually set the fire intial position for a static fire.
+        Manually set the fire initial position(s) for a static fire.
 
         Arguments:
-            pos: The (x, y) coordinates to start the fire at
+            pos: Either a single (x, y) coordinate pair or a list of (x, y)
+                 coordinate pairs to start the fire at
         """
         self.config.reset_fire(pos=pos)
 
@@ -819,12 +839,6 @@ class FireSimulation(Simulation):
                 log.warning(message)
                 warnings.warn(message)
                 success = False
-
-        if success:
-            # all keys are valid
-            self.config.reset_terrain(
-                topography_type=types["elevation"], fuel_type=types["fuel"]
-            )
 
         return success
 
@@ -985,7 +999,8 @@ class FireSimulation(Simulation):
                 record=True,
             )
         else:
-            self._game.quit()
+            if hasattr(self, "_game"):
+                self._game.quit()
 
     def _render(self) -> None:
         """

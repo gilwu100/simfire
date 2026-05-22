@@ -36,6 +36,9 @@ from .units import mph_to_ftpm, scale_ms_to_ftpm, str_to_minutes
 
 log = create_logger(__name__)
 
+PointType = Tuple[int, int]
+InitPosType = Union[PointType, list[PointType], tuple[PointType, ...]]
+
 
 class ConfigError(Exception):
     """
@@ -182,7 +185,7 @@ class TerrainConfig:
 
 @dataclasses.dataclass
 class FireConfig:
-    fire_initial_position: Tuple[int, int]
+    fire_initial_position: InitPosType
     diagonal_spread: bool
     max_fire_duration: int
     seed: Optional[int] = None
@@ -334,6 +337,15 @@ class Config:
                     log.warning(message)
                     self.yaml_data["operational"]["seed"] += 1
                     landfire_lat_long_box = self._make_lat_long_box()
+                else:
+                    height = self.yaml_data["operational"]["height"]
+                    width = self.yaml_data["operational"]["width"]
+                    landfire_lat_long_box = LandFireLatLongBox(
+                        points=points,
+                        year=year,
+                        height=height,
+                        width=width,
+                    )
             else:
                 tl_lat = self.yaml_data["operational"]["latitude"]
                 tl_lon = self.yaml_data["operational"]["longitude"]
@@ -772,7 +784,7 @@ class Config:
         )
         return historical_layer
 
-    def _load_fire(self, pos: Optional[Tuple[int, int]] = None) -> FireConfig:
+    def _load_fire(self, pos: Optional[InitPosType] = None) -> FireConfig:
         """
         Load the FireConfig from the YAML data.
 
@@ -788,13 +800,58 @@ class Config:
                 fire_pos = self.yaml_data["fire"]["fire_initial_position"]["static"][
                     "position"
                 ]
+
+                # Handle string input for a single ignition point such as "(x, y)"
                 if isinstance(fire_pos, str):
-                    fire_pos = fire_pos[1:-1].split(",")
-                if len(fire_pos) > 2:
+                    fire_pos = fire_pos.strip()
+                    if fire_pos.startswith("(") and fire_pos.endswith(")"):
+                        fire_pos = fire_pos[1:-1].split(",")
+                        if len(fire_pos) != 2:
+                            raise ConfigError(
+                                "`fire_initial_position` should only be a Tuple of length 2"
+                            )
+                        fire_initial_position: InitPosType = (
+                            int(fire_pos[0]),
+                            int(fire_pos[1]),
+                        )
+                    else:
+                        raise ConfigError(
+                            "String `fire_initial_position` must be in the format '(x, y)'"
+                        )
+
+                # Handle a single ignition point like [x, y] or (x, y)
+                elif (
+                    isinstance(fire_pos, (list, tuple))
+                    and len(fire_pos) == 2
+                    and all(isinstance(v, (int, float)) for v in fire_pos)
+                ):
+                    fire_initial_position = (int(fire_pos[0]), int(fire_pos[1]))
+
+                # Handle multiple ignition points like [[x1, y1], [x2, y2], ...]
+                elif isinstance(fire_pos, (list, tuple)):
+                    parsed_points: list[PointType] = []
+                    for p in fire_pos:
+                        if not (
+                            isinstance(p, (list, tuple))
+                            and len(p) == 2
+                            and all(isinstance(v, (int, float)) for v in p)
+                        ):
+                            raise ConfigError(
+                                "Each fire initial position must be a pair of coordinates"
+                            )
+                        parsed_points.append((int(p[0]), int(p[1])))
+
+                    if len(parsed_points) == 0:
+                        raise ConfigError(
+                            "At least one fire initial position is required"
+                        )
+
+                    fire_initial_position = parsed_points
+
+                else:
                     raise ConfigError(
-                        "`fire_initial_position` should only be a Tuple of length 2"
+                        "Unsupported format for static `fire_initial_position`"
                     )
-                fire_initial_position = (int(fire_pos[0]), int(fire_pos[1]))
             # Pos is specified, so use that
             else:
                 fire_initial_position = pos
@@ -1023,14 +1080,14 @@ class Config:
         # Need to check if any data layer types are changing, since the
         # screen_size could be affected
         if topography_type is not None and fuel_type is not None:
-            # Special case when going from all operational to all functional, so
+            # Special case when going from all operational back to all functional, so
             # we need to revert back to the original screen_size from the config file
-            if topography_type == "operational" and fuel_type == "operational":
+            if topography_type == "functional" and fuel_type == "functional":
                 if (
-                    self.terrain.topography_type == "functional"
-                    and self.terrain.fuel_type == "functional"
+                    self.terrain.topography_type == "operational"
+                    and self.terrain.fuel_type == "operational"
                 ):
-                    self.yaml_data["screen_size"] = self.original_screen_size
+                    self.yaml_data["area"]["screen_size"] = self.original_screen_size
         if topography_type is not None:
             # Update the yaml data
             self.yaml_data["terrain"]["topography"]["type"] = topography_type
@@ -1086,7 +1143,7 @@ class Config:
         self.wind = self._load_wind()
 
     def reset_fire(
-        self, seed: Optional[int] = None, pos: Optional[Tuple[int, int]] = None
+        self, seed: Optional[int] = None, pos: Optional[InitPosType] = None
     ) -> None:
         """
         Reset the fire initial position seed. Note that both `seed` and `pos` cannot
@@ -1095,7 +1152,7 @@ class Config:
 
         Arguments:
             seed: The seed used to randomize fire initial position generation.
-            pos: The static position to start the fire at
+            pos: The static position(s) to start the fire at
         """
         fire_init_pos_type = self.yaml_data["fire"]["fire_initial_position"]["type"]
 
