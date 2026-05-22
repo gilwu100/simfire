@@ -243,7 +243,8 @@ class FireManager:
 
         e.g. if the `rate_of_spread` (RoS) was 10 for a location where a fireline was
         located, and `RosAttenuation.FIRELINE` was set to 6, it would become 4 as a
-        result of this function.
+        result of this function. If the subtraction would make the value negative,
+        it is clamped to 0.
 
         Arguments:
             rate_of_spread: The array that keeps track of the rate of spread for
@@ -275,7 +276,8 @@ class FireManager:
                 RoSAttenuation.SCRATCHLINE
             )
             factor[np.where(fire_map == BurnStatus.WETLINE)] = RoSAttenuation.WETLINE
-            rate_of_spread = rate_of_spread - factor
+            # Clamp at 0 so attenuation cannot produce negative spread values
+            rate_of_spread = np.maximum(rate_of_spread - factor, 0)
         else:
             rate_of_spread[np.where(fire_map == BurnStatus.FIRELINE)] = 0
             rate_of_spread[np.where(fire_map == BurnStatus.SCRATCHLINE)] = 0
@@ -478,6 +480,7 @@ class RothermelFireManager(FireManager):
         new_loc_y = list(int(val) for val in new_locs_uzip[1])
         loc_x = [x] * num_locs
         loc_y = [y] * num_locs
+        # new_locs_uzip[::-1] reverses (x_list, y_list) into (y_list, x_list).
         n_w_0, n_delta, n_M_x, n_sigma = list(
             zip(*[astuple(fuel) for fuel in self.terrain.fuels[new_locs_uzip[::-1]]])
         )
@@ -548,43 +551,81 @@ class RothermelFireManager(FireManager):
         return [arr[i, :] for i in range(arr.shape[0])]
 
     def _update_with_new_locs(
-        self, y_coords: np.ndarray, x_coords: np.ndarray, fire_map: np.ndarray
+        self,
+        loc_y: np.ndarray,
+        loc_x: np.ndarray,
+        y_coords: np.ndarray,
+        x_coords: np.ndarray,
+        fire_map: np.ndarray,
     ) -> np.ndarray:
         """
         Update `self.sprites` with new sprites, `self.durations` with new durations, and
         return an updated fire map with new burn locations
 
         Arguments:
-            y_coords: The Y coordinates of all new fires
-            x_coords: The X coordinates of all new fires
+            y_coords: The Y coordinates of all candidate new fires
+            x_coords: The X coordinates of all candidate new fires
             fire_map: The numpy array that tracks the fire's burn status for
                       each pixel in the simulation
 
         Returns:
             A NumPy array of the updated `fire_map`
         """
-        y_coords, x_coords = np.unique(np.vstack((y_coords, x_coords)), axis=1)
-        # Check which coordinates have passed the threhold for burning
-        new_burn = np.argwhere(self.burn_amounts[y_coords, x_coords] > self.pixel_scale)
+        # Determine per-candidate travel distance:
+        # orthogonal neighbors -> pixel_scale
+        # diagonal neighbors   -> sqrt(2) * pixel_scale
+        dx = np.abs(x_coords - loc_x).astype(np.float32)
+        dy = np.abs(y_coords - loc_y).astype(np.float32)
+        travel_distance = self.pixel_scale * np.sqrt(dx**2 + dy**2)
+
+        # Check which candidate coordinates have passed their required threshold.
+        # This now distinguishes orthogonal and diagonal neighbors by using the
+        # source-to-destination grid distance in pixels scaled by `pixel_scale`.
+        new_burn_mask = self.burn_amounts[y_coords, x_coords] > travel_distance
+
+        # Keep only the candidates that are ready to ignite
+        burn_y = y_coords[new_burn_mask]
+        burn_x = x_coords[new_burn_mask]
+
+        # Avoid creating duplicate sprites at the same location
+        if burn_x.size > 0:
+            burn_y, burn_x = np.unique(np.vstack((burn_y, burn_x)), axis=1)
+
+            # Filter out locations already burning/burned, just to be safe
+            valid_mask = np.isin(
+                fire_map[burn_y, burn_x],
+                [
+                    BurnStatus.UNBURNED,
+                    BurnStatus.FIRELINE,
+                    BurnStatus.SCRATCHLINE,
+                    BurnStatus.WETLINE,
+                ],
+            )
+            burn_y = burn_y[valid_mask]
+            burn_x = burn_x[valid_mask]
+        else:
+            burn_y = np.array([], dtype=int)
+            burn_x = np.array([], dtype=int)
 
         # Create new sprites and durations for the new fire locations
         new_sprites = [
-            Fire((x_coords[burn[0]], y_coords[burn[0]]), self.fire_size, self.headless)
-            for burn in new_burn
+            Fire((burn_x[i], burn_y[i]), self.fire_size, self.headless)
+            for i in range(len(burn_x))
         ]
         new_durations = [0] * len(new_sprites)
 
-        # Update the current list of sprites/duraions with the new ones
+        # Update the current list of sprites/durations with the new ones
         self.sprites += new_sprites
         self.durations += new_durations
 
         # Update the graph with the new burning coordinates
-        x_coords_graph = x_coords[new_burn].squeeze().tolist()
-        y_coords_graph = y_coords[new_burn].squeeze().tolist()
+        x_coords_graph = burn_x.tolist()
+        y_coords_graph = burn_y.tolist()
         self.fs_graph.add_edges_from_manager(x_coords_graph, y_coords_graph, fire_map)
 
         # Update the fire_map with the new burning coordinates
-        fire_map[y_coords[new_burn], x_coords[new_burn]] = BurnStatus.BURNING
+        if len(burn_x) > 0:
+            fire_map[burn_y, burn_x] = BurnStatus.BURNING
 
         return fire_map
 
@@ -639,7 +680,8 @@ class RothermelFireManager(FireManager):
 
         # If we've reached the end time, quit the sim
         if self.max_time is not None:
-            if self.update_rate > self.max_time or self.elapsed_time > self.max_time:
+            # Stop once the elapsed simulation time has reached the configured limit.
+            if self.elapsed_time >= self.max_time:
                 return fire_map, GameStatus.QUIT
 
         sprite_idxs = list(range(num_sprites))
@@ -700,9 +742,13 @@ class RothermelFireManager(FireManager):
         x_coords = new_loc_x.astype(int)
 
         # Create a rate_of_spread variable that takes the same shape as self.burn_amounts
-        # and fire_map
-        rate_of_spread = np.zeros_like(self.burn_amounts)
-        rate_of_spread[y_coords, x_coords] = R
+        # and fire_map. 
+        rate_of_spread = np.zeros_like(self.burn_amounts, dtype=np.float32)
+        # Accumulate contributions from all source->destination spread attempts.
+        # Equivalent to:
+        # for i in range(len(R)):
+        #     rate_of_spread[y_coords[i], x_coords[i]] += R[i]
+        np.add.at(rate_of_spread, (y_coords, x_coords), R)
 
         # Update the burn_amounts dependent on if there are control lines there
         # And only update if specified in the class
@@ -711,7 +757,13 @@ class RothermelFireManager(FireManager):
 
         # Update the fire_map with new burning locations and update self.sprites and
         # self.durations
-        fire_map = self._update_with_new_locs(y_coords, x_coords, fire_map)
+        fire_map = self._update_with_new_locs(
+            loc_y.astype(int),
+            loc_x.astype(int),
+            y_coords,
+            x_coords,
+            fire_map,
+        )
 
         # Save the new elapsed_time value
         self.elapsed_time += self.update_rate
@@ -777,6 +829,9 @@ class ConstantSpreadFireManager(FireManager):
                 for loc in new_locs:
                     new_sprite = Fire(loc, self.fire_size, self.headless)
                     self.sprites.append(new_sprite)
+                    # Append a matching duration for each newly created sprite so
+                    # `self.sprites` and `self.durations` stay synchronized.
+                    self.durations.append(0)
                     fire_map[loc[1], loc[0]] = BurnStatus.BURNING
             else:
                 continue
