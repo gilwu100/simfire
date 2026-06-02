@@ -557,18 +557,34 @@ class FireSimulation(Simulation):
     def _create_fire_map(self) -> None:
         """
         Resets the `self.fire_map` attribute to entirely `BurnStatus.UNBURNED`,
-        except for `self.config.fire.fire_initial_position`, which may be a
-        single ignition point or multiple ignition points, all of which are set to
-        `BurnStatus.BURNING`.
+        then applies any configured initial burned positions and initial burning
+        positions.
+    
+        Burned positions are applied first, then burning positions are applied so
+        that ignition points override burned cells if they overlap.
         """
         self.fire_map = np.full(
             self.config.area.screen_size,
             BurnStatus.UNBURNED,
         )
-
+    
+        burned_pos = getattr(self.config.fire, "burned_positions", None)
         init_pos = self.config.fire.fire_initial_position
-
-        # Single ignition point
+    
+        # Apply initial burned positions first
+        if burned_pos is not None:
+            if (
+                isinstance(burned_pos, tuple)
+                and len(burned_pos) == 2
+                and all(isinstance(v, (int, np.integer)) for v in burned_pos)
+            ):
+                x, y = burned_pos
+                self.fire_map[y, x] = BurnStatus.BURNED
+            else:
+                for x, y in burned_pos:
+                    self.fire_map[y, x] = BurnStatus.BURNED
+    
+        # Apply initial burning positions second so they override burned cells
         if (
             isinstance(init_pos, tuple)
             and len(init_pos) == 2
@@ -577,10 +593,8 @@ class FireSimulation(Simulation):
             x, y = init_pos
             self.fire_map[y, x] = BurnStatus.BURNING
         else:
-            # Multiple ignition points
             for x, y in init_pos:
                 self.fire_map[y, x] = BurnStatus.BURNING
-
     def _create_agent_positions(self) -> None:
         """
         Resets the `self.agent_positions` attribute to entirely `0`

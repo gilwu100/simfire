@@ -189,7 +189,7 @@ class FireConfig:
     diagonal_spread: bool
     max_fire_duration: int
     seed: Optional[int] = None
-
+    burned_positions: Optional[InitPosType] = None
 
 @dataclasses.dataclass
 class EnvironmentConfig:
@@ -797,65 +797,23 @@ class Config:
         if fire_init_pos_type == "static":
             # If pos is unspecified, read from the YAML data
             if pos is None:
-                fire_pos = self.yaml_data["fire"]["fire_initial_position"]["static"][
-                    "position"
-                ]
-
-                # Handle string input for a single ignition point such as "(x, y)"
-                if isinstance(fire_pos, str):
-                    fire_pos = fire_pos.strip()
-                    if fire_pos.startswith("(") and fire_pos.endswith(")"):
-                        fire_pos = fire_pos[1:-1].split(",")
-                        if len(fire_pos) != 2:
-                            raise ConfigError(
-                                "`fire_initial_position` should only be a Tuple of length 2"
-                            )
-                        fire_initial_position: InitPosType = (
-                            int(fire_pos[0]),
-                            int(fire_pos[1]),
-                        )
-                    else:
-                        raise ConfigError(
-                            "String `fire_initial_position` must be in the format '(x, y)'"
-                        )
-
-                # Handle a single ignition point like [x, y] or (x, y)
-                elif (
-                    isinstance(fire_pos, (list, tuple))
-                    and len(fire_pos) == 2
-                    and all(isinstance(v, (int, float)) for v in fire_pos)
-                ):
-                    fire_initial_position = (int(fire_pos[0]), int(fire_pos[1]))
-
-                # Handle multiple ignition points like [[x1, y1], [x2, y2], ...]
-                elif isinstance(fire_pos, (list, tuple)):
-                    parsed_points: list[PointType] = []
-                    for p in fire_pos:
-                        if not (
-                            isinstance(p, (list, tuple))
-                            and len(p) == 2
-                            and all(isinstance(v, (int, float)) for v in p)
-                        ):
-                            raise ConfigError(
-                                "Each fire initial position must be a pair of coordinates"
-                            )
-                        parsed_points.append((int(p[0]), int(p[1])))
-
-                    if len(parsed_points) == 0:
-                        raise ConfigError(
-                            "At least one fire initial position is required"
-                        )
-
-                    fire_initial_position = parsed_points
-
-                else:
-                    raise ConfigError(
-                        "Unsupported format for static `fire_initial_position`"
-                    )
+                fire_pos = self.yaml_data["fire"]["fire_initial_position"]["static"]["position"]
+                fire_initial_position = self._parse_point_or_points(
+                    fire_pos, "fire_initial_position"
+                )
             # Pos is specified, so use that
             else:
                 fire_initial_position = pos
-            return FireConfig(fire_initial_position, diagonal_spread, max_fire_duration)
+        
+            burned_positions = self.yaml_data["fire"].get("burned_positions")
+                    
+            return FireConfig(
+                fire_initial_position,
+                diagonal_spread,
+                max_fire_duration,
+                None,
+                burned_positions,
+            )
         elif fire_init_pos_type == "random":
             if pos is not None:
                 log.warn(
@@ -1143,7 +1101,10 @@ class Config:
         self.wind = self._load_wind()
 
     def reset_fire(
-        self, seed: Optional[int] = None, pos: Optional[InitPosType] = None
+        self,
+        seed: Optional[int] = None,
+        pos: Optional[InitPosType] = None,
+        burned_pos: Optional[InitPosType] = None,
     ) -> None:
         """
         Reset the fire initial position seed. Note that both `seed` and `pos` cannot
@@ -1172,13 +1133,19 @@ class Config:
                     f"({fire_init_pos_type}), which does not support the use of a "
                     "seed. The seed value will be ignored."
                 )
-        elif seed is None and pos is not None:
+        elif seed is None and (pos is not None or burned_pos is not None):
             try:
-                # For consistency, ensure YAML data contains the same position value.
-                self.yaml_data["fire"]["fire_initial_position"][fire_init_pos_type][
-                    "position"
-                ] = pos
-                # Reload the FireConfig with the updated position in the yaml data
+                if pos is not None:
+                    # For consistency, ensure YAML data contains the same position value.
+                    self.yaml_data["fire"]["fire_initial_position"][fire_init_pos_type][
+                        "position"
+                    ] = pos
+                if burned_pos is not None:
+                    self.yaml_data["fire"]["fire_initial_position"][fire_init_pos_type][
+                        "burned_positions"
+                    ] = burned_pos
+        
+                # Reload the FireConfig with the updated values in the yaml data
                 self.fire = self._load_fire(pos=pos)
             except KeyError:
                 log.warning(
@@ -1198,3 +1165,53 @@ class Config:
         """
         with open(path, "w") as f:
             yaml.dump(self.yaml_data, f)
+            
+    def _parse_point_or_points(self, value: Any, field_name: str) -> InitPosType:
+        """
+        Parse either a single (x, y) point or a collection of (x, y) points.
+    
+        Arguments:
+            value: The input value to parse
+            field_name: Name of the field for error messages
+    
+        Returns:
+            A single (x, y) tuple or a list of (x, y) tuples
+        """
+        # Handle string input for a single point such as "(x, y)"
+        if isinstance(value, str):
+            value = value.strip()
+            if value.startswith("(") and value.endswith(")"):
+                value = value[1:-1].split(",")
+                if len(value) != 2:
+                    raise ConfigError(f"`{field_name}` should only be a Tuple of length 2")
+                return (int(value[0]), int(value[1]))
+            raise ConfigError(f"String `{field_name}` must be in the format '(x, y)'")
+    
+        # Handle a single point like [x, y] or (x, y)
+        if (
+            isinstance(value, (list, tuple))
+            and len(value) == 2
+            and all(isinstance(v, (int, float)) for v in value)
+        ):
+            return (int(value[0]), int(value[1]))
+    
+        # Handle multiple points like [[x1, y1], [x2, y2], ...]
+        if isinstance(value, (list, tuple)):
+            parsed_points: list[PointType] = []
+            for p in value:
+                if not (
+                    isinstance(p, (list, tuple))
+                    and len(p) == 2
+                    and all(isinstance(v, (int, float)) for v in p)
+                ):
+                    raise ConfigError(
+                        f"Each `{field_name}` entry must be a pair of coordinates"
+                    )
+                parsed_points.append((int(p[0]), int(p[1])))
+    
+            if len(parsed_points) == 0:
+                raise ConfigError(f"At least one `{field_name}` position is required")
+    
+            return parsed_points
+    
+        raise ConfigError(f"Unsupported format for `{field_name}`")
