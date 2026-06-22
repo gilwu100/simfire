@@ -123,10 +123,13 @@ class SimulationConfig:
 @dataclasses.dataclass
 class MitigationConfig:
     ros_attenuation: bool
+    direct_attack_alpha: float = 1.0
+    direct_attack_duration: float = 20.0
 
     def __post_init__(self) -> None:
         self.ros_attenuation = bool(self.ros_attenuation)
-
+        self.direct_attack_alpha = float(self.direct_attack_alpha)
+        self.direct_attack_duration = float(self.direct_attack_duration)
 
 @dataclasses.dataclass
 class OperationalConfig:
@@ -804,9 +807,15 @@ class Config:
             # Pos is specified, so use that
             else:
                 fire_initial_position = pos
-        
-            burned_positions = self.yaml_data["fire"].get("burned_positions")
-                    
+    
+            burned_positions_raw = self.yaml_data["fire"].get("burned_positions")
+            if burned_positions_raw is not None:
+                burned_positions = self._parse_point_or_points(
+                    burned_positions_raw, "burned_positions"
+                )
+            else:
+                burned_positions = None
+    
             return FireConfig(
                 fire_initial_position,
                 diagonal_spread,
@@ -816,7 +825,7 @@ class Config:
             )
         elif fire_init_pos_type == "random":
             if pos is not None:
-                log.warn(
+                log.warning(
                     "`pos` is specified, but the initialization type is `random`. "
                     "Ignoring `pos`."
                 )
@@ -825,13 +834,38 @@ class Config:
             rng = np.random.default_rng(seed)
             pos_x = rng.integers(screen_size[1], dtype=int)
             pos_y = rng.integers(screen_size[0], dtype=int)
-            return FireConfig((pos_x, pos_y), diagonal_spread, max_fire_duration, seed)
+    
+            burned_positions_raw = self.yaml_data["fire"].get("burned_positions")
+            if burned_positions_raw is not None:
+                burned_positions = self._parse_point_or_points(
+                    burned_positions_raw, "burned_positions"
+                )
+            else:
+                burned_positions = None
+    
+            return FireConfig(
+                (pos_x, pos_y),
+                diagonal_spread,
+                max_fire_duration,
+                seed,
+                burned_positions,
+            )
+    
         elif fire_init_pos_type == "historical":
+            burned_positions_raw = self.yaml_data["fire"].get("burned_positions")
+            if burned_positions_raw is not None:
+                burned_positions = self._parse_point_or_points(
+                    burned_positions_raw, "burned_positions"
+                )
+            else:
+                burned_positions = None
+    
             return FireConfig(
                 (self.historical_layer.fire_start_x, self.historical_layer.fire_start_y),
                 diagonal_spread,
                 max_fire_duration,
                 None,
+                burned_positions,
             )
         else:
             raise ConfigError(
@@ -1079,7 +1113,7 @@ class Config:
                 if "seed" in self.yaml_data["wind"][speed_fn_name]["speed"]:
                     self.yaml_data["wind"][speed_fn_name]["speed"]["seed"] = speed_seed
                 else:
-                    log.warn(
+                    log.warning(
                         "Attempted to reset speed seed for wind fucntion "
                         f"{speed_fn_name}, but no seed parameter exists in the config"
                     )
@@ -1092,7 +1126,7 @@ class Config:
                         "seed"
                     ] = direction_seed
                 else:
-                    log.warn(
+                    log.warning(
                         "Attempted to reset direction seed for wind fucntion "
                         f"{direction_fn_name}, but no seed parameter exists in the "
                         "config"
@@ -1107,19 +1141,21 @@ class Config:
         burned_pos: Optional[InitPosType] = None,
     ) -> None:
         """
-        Reset the fire initial position seed. Note that both `seed` and `pos` cannot
-        be specified together since `seed` is used for random/dynamic cases and `pos`
-        is used for static cases.
-
+        Reset the fire initial position seed. Note that `seed` cannot be specified
+        together with `pos` and/or `burned_pos` since `seed` is used for random/dynamic
+        cases and `pos` / `burned_pos` are used for static-style initialization.
+    
         Arguments:
             seed: The seed used to randomize fire initial position generation.
             pos: The static position(s) to start the fire at
+            burned_pos: The static position(s) to initialize as already burned
         """
         fire_init_pos_type = self.yaml_data["fire"]["fire_initial_position"]["type"]
-
-        if seed is None and pos is None:
-            raise ValueError("Both `seed` and `pos` cannot be None")
-        elif seed is not None and pos is None:
+    
+        if seed is None and pos is None and burned_pos is None:
+            raise ValueError("`seed`, `pos`, and `burned_pos` cannot all be None")
+    
+        elif seed is not None and pos is None and burned_pos is None:
             try:
                 # Change the seed for the current fire initital position type
                 self.yaml_data["fire"]["fire_initial_position"][fire_init_pos_type][
@@ -1133,6 +1169,7 @@ class Config:
                     f"({fire_init_pos_type}), which does not support the use of a "
                     "seed. The seed value will be ignored."
                 )
+    
         elif seed is None and (pos is not None or burned_pos is not None):
             try:
                 if pos is not None:
@@ -1140,22 +1177,25 @@ class Config:
                     self.yaml_data["fire"]["fire_initial_position"][fire_init_pos_type][
                         "position"
                     ] = pos
+    
                 if burned_pos is not None:
-                    self.yaml_data["fire"]["fire_initial_position"][fire_init_pos_type][
-                        "burned_positions"
-                    ] = burned_pos
-        
+                    self.yaml_data["fire"]["burned_positions"] = burned_pos
+    
                 # Reload the FireConfig with the updated values in the yaml data
                 self.fire = self._load_fire(pos=pos)
+    
             except KeyError:
                 log.warning(
                     "Trying to set a position for fire initial position type "
                     f"({fire_init_pos_type}), which does not support the use of a "
                     "position. The position value will be ignored."
                 )
+    
         else:
-            raise ValueError("Both `seed` and `pos` cannot be specified together")
-
+            raise ValueError(
+                "`seed` cannot be specified together with `pos` and/or `burned_pos`"
+            )
+ 
     def save(self, path: Union[str, Path]) -> None:
         """
         Save the current config to the specified path.

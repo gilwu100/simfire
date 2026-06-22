@@ -8,7 +8,7 @@ Defines the different `FireManager`s (`ConstantSpreadFireManager` and
 
 import collections
 from dataclasses import astuple
-from typing import Any, List, Optional, Sequence, Tuple, Union
+from typing import Any, Iterable, List, Optional, Sequence, Tuple, Union
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -61,6 +61,8 @@ class FireManager:
         fire_size: int,
         max_fire_duration: int,
         attenuate_line_ros: bool = True,
+        direct_attack_alpha: float = 1.0,
+        direct_attack_duration: float = 20.0,
         headless: bool = False,
         diagonal_spread: bool = True,
     ) -> None:
@@ -86,6 +88,10 @@ class FireManager:
                                 values found in `enums.RoSAttenuation` from the initial
                                 rate of spread calculation. If set to `False`, all
                                 different control lines will completely stop the fire.
+            direct_attack_alpha: scaling factor between 0 and 1 that models the effect
+                                 of a direct attack
+            direct_attack_duration: duration in minutes for which a direct attack
+                                    remains active once applied
             headless: Flag to run in a headless state. This will allow PyGame objects to
                       not be initialized.
             diagonal_spread: Whether or not to have the fire spread calculation apply to
@@ -98,6 +104,14 @@ class FireManager:
         self.fire_size = fire_size
         self.max_fire_duration = max_fire_duration
         self.attenuate_line_ros = attenuate_line_ros
+        self.direct_attack_alpha = float(direct_attack_alpha)
+        if self.direct_attack_alpha < 0:
+            raise ValueError("direct_attack_alpha must be nonnegative")
+        if self.direct_attack_alpha > 1:
+            raise ValueError("direct_attack_alpha must not be greater than 1")
+        self.direct_attack_duration = float(direct_attack_duration)
+        if self.direct_attack_duration < 0:
+            raise ValueError("direct_attack_duration must be nonnegative")
         self.headless = headless
         self.diagonal_spread = diagonal_spread
 
@@ -164,7 +178,6 @@ class FireManager:
         Returns:
             An updated `fire_map` with sprites pruned
         """
-        # lists_zipped = [[s, d] for s, d in zip(self.sprites, self.durations)]
         lists_zipped = list(zip(self.sprites, self.durations))
         # Get the sprites whose duration exceeds the max allowed duration
         expired_results = list(
@@ -272,58 +285,6 @@ class FireManager:
 
         return new_locs
 
-    def _update_rate_of_spread(
-        self, rate_of_spread: np.ndarray, fire_map: np.ndarray
-    ) -> np.ndarray:
-        """Update the burn amounts based on control line status.
-
-        This will subtract the rate of spread for all control line locations in
-        `rate_of_spread` by the numbers set in `enums.RosAttenuation`.
-
-        e.g. if the `rate_of_spread` (RoS) was 10 for a location where a fireline was
-        located, and `RosAttenuation.FIRELINE` was set to 6, it would become 4 as a
-        result of this function. If the subtraction would make the value negative,
-        it is clamped to 0.
-
-        Arguments:
-            rate_of_spread: The array that keeps track of the rate of spread for
-                            all pixel locations.
-            fire_map: The array that maintains information about the status of the fire
-                      at each pixel location (`BURNED`, `UNBURNED`, `FIRELINE`, etc.)
-
-        Returns:
-            An updated `rate_of_spread` array, taking into account the control lines
-        """
-        # Changed this from an assert to an if and log error due to bandit report:
-        # Issue: [B101:assert_used] Use of assert detected. The enclosed code will be
-        #        removed when compiling to optimised byte code.
-        #  Severity: Low   Confidence: High
-        #  CWE: CWE-703 (https://cwe.mitre.org/data/definitions/703.html)
-        #  Location: simfire/game/managers/fire.py:237:8
-        #  More Info: https://bandit.readthedocs.io/en/1.7.4/plugins/b101_assert_used.html
-        if fire_map.shape != rate_of_spread.shape:
-            log.error(
-                "The fire map does not match the shape of the rate of spread in "
-                "FireManager._update_rate_of_spread"
-            )
-            raise AssertionError
-
-        factor = np.zeros_like(rate_of_spread)
-        if self.attenuate_line_ros:
-            factor[np.where(fire_map == BurnStatus.FIRELINE)] = RoSAttenuation.FIRELINE
-            factor[np.where(fire_map == BurnStatus.SCRATCHLINE)] = (
-                RoSAttenuation.SCRATCHLINE
-            )
-            factor[np.where(fire_map == BurnStatus.WETLINE)] = RoSAttenuation.WETLINE
-            # Clamp at 0 so attenuation cannot produce negative spread values
-            rate_of_spread = np.maximum(rate_of_spread - factor, 0)
-        else:
-            rate_of_spread[np.where(fire_map == BurnStatus.FIRELINE)] = 0
-            rate_of_spread[np.where(fire_map == BurnStatus.SCRATCHLINE)] = 0
-            rate_of_spread[np.where(fire_map == BurnStatus.WETLINE)] = 0
-
-        return rate_of_spread
-
 
 class RothermelFireManager(FireManager):
     """
@@ -343,6 +304,8 @@ class RothermelFireManager(FireManager):
         environment: Environment,
         max_time: Optional[int] = None,
         attenuate_line_ros: bool = True,
+        direct_attack_alpha: float = 1.0,
+        direct_attack_duration: float = 20.0,
         headless: bool = False,
         diagonal_spread: bool = True,
     ) -> None:
@@ -379,6 +342,10 @@ class RothermelFireManager(FireManager):
                                 values found in `enums.RoSAttenuation` from the initial
                                 rate of spread calculation. If set to `False`, all
                                 different control lines will completely stop the fire.
+            direct_attack_alpha: scaling factor between 0 and 1 that models the effect
+                                 of a direct attack
+            direct_attack_duration: duration in minutes for which a direct attack
+                                    remains active once applied
             headless: Flag to run in a headless state. This will allow PyGame objects to
                       not be initialized.
             diagonal_spread: Whether or not to have the fire spread calculation apply to
@@ -390,6 +357,8 @@ class RothermelFireManager(FireManager):
             fire_size,
             max_fire_duration,
             attenuate_line_ros,
+            direct_attack_alpha,
+            direct_attack_duration,
             headless,
             diagonal_spread,
         )
@@ -414,12 +383,51 @@ class RothermelFireManager(FireManager):
         # Keep track of how much each pixel is currently burning
         self.rate_of_spread = np.zeros_like(self.terrain.fuels)
 
+        # Keep track of direct-attack expiration time per pixel.
+        # A value greater than self.elapsed_time means the effect is active.
+        self.direct_attack_end_time = np.zeros(
+            self.terrain.screen_size, dtype=np.float32
+        )
+
         # Pre-compute the slope magnitudes and directions for use with
         # Rothermel calculation
         self.slope_mag, self.slope_dir = self._compute_slopes()
 
         # Create a FireSpreadGraph to track the fire
         self.fs_graph = FireSpreadGraph(self.terrain.screen_size)
+
+    def activate_direct_attack(
+        self,
+        points: Iterable[Tuple[int, int]],
+        duration: Optional[float] = None,
+    ) -> None:
+        """
+        Activate direct attack on the given points for the specified duration.
+
+        Arguments:
+            points: Iterable of (column, row) points
+            duration: Duration in minutes. If None, use self.direct_attack_duration
+        """
+        if duration is None:
+            duration = self.direct_attack_duration
+
+        expire_time = self.elapsed_time + float(duration)
+
+        for col, row in points:
+            if (
+                0 <= row < self.direct_attack_end_time.shape[0]
+                and 0 <= col < self.direct_attack_end_time.shape[1]
+            ):
+                self.direct_attack_end_time[row, col] = max(
+                    self.direct_attack_end_time[row, col],
+                    expire_time,
+                )
+
+    def get_direct_attack_mask(self) -> np.ndarray:
+        """
+        Return a boolean mask indicating where direct attack is currently active.
+        """
+        return self.direct_attack_end_time > self.elapsed_time
 
     def _get_environment_parameters(
         self, environment: Environment
@@ -576,19 +584,70 @@ class RothermelFireManager(FireManager):
             The input is transformed from a list of lists/tuples into a 2D array
             containing the information in a vectorized/multiprocessing format
         """
-        if len(self.sprites) == 1:  # single burning pixel case (first sim step typically)
+        if len(self.sprites) == 1:
             arr = np.asarray(all_params, dtype=np.float32)
             arr = np.reshape(arr, (arr.shape[1], arr.shape[0] * arr.shape[2]))
-        else:  # Multiple burning pixels
+        else:
             num_params_per_example = len(all_params[0])
             list_arr = [
-                # Ignore type warning since everyting gets converted to array of floats
                 np.hstack([x[i] for x in all_params])  # type: ignore
                 for i in range(num_params_per_example)
             ]
             arr = np.asarray(list_arr, dtype=np.float32)
 
         return [arr[i, :] for i in range(arr.shape[0])]
+
+    def _update_rate_of_spread(
+        self, rate_of_spread: np.ndarray, fire_map: np.ndarray
+    ) -> np.ndarray:
+        """Update the burn amounts based on control line status.
+
+        This will subtract the rate of spread for all control line locations in
+        `rate_of_spread` by the numbers set in `enums.RosAttenuation`.
+
+        e.g. if the `rate_of_spread` (RoS) was 10 for a location where a fireline was
+        located, and `RosAttenuation.FIRELINE` was set to 6, it would become 4 as a
+        result of this function. If the subtraction would make the value negative,
+        it is clamped to 0.
+
+        In addition, if direct attack is active on a pixel, the rate of spread into
+        that pixel is multiplied by `self.direct_attack_alpha`.
+
+        Arguments:
+            rate_of_spread: The array that keeps track of the rate of spread for
+                            all pixel locations.
+            fire_map: The array that maintains information about the status of the fire
+                      at each pixel location (`BURNED`, `UNBURNED`, `FIRELINE`, etc.)
+
+        Returns:
+            An updated `rate_of_spread` array, taking into account the control lines
+        """
+        if fire_map.shape != rate_of_spread.shape:
+            log.error(
+                "The fire map does not match the shape of the rate of spread in "
+                "FireManager._update_rate_of_spread"
+            )
+            raise AssertionError
+
+        factor = np.zeros_like(rate_of_spread)
+        if self.attenuate_line_ros:
+            factor[np.where(fire_map == BurnStatus.FIRELINE)] = RoSAttenuation.FIRELINE
+            factor[np.where(fire_map == BurnStatus.SCRATCHLINE)] = (
+                RoSAttenuation.SCRATCHLINE
+            )
+            factor[np.where(fire_map == BurnStatus.WETLINE)] = RoSAttenuation.WETLINE
+            # Clamp at 0 so attenuation cannot produce negative spread values
+            rate_of_spread = np.maximum(rate_of_spread - factor, 0)
+        else:
+            rate_of_spread[np.where(fire_map == BurnStatus.FIRELINE)] = 0
+            rate_of_spread[np.where(fire_map == BurnStatus.SCRATCHLINE)] = 0
+            rate_of_spread[np.where(fire_map == BurnStatus.WETLINE)] = 0
+
+        # Scale the rate of spread to model the effect of a direct attack
+        direct_attack_mask = self.get_direct_attack_mask()
+        rate_of_spread[direct_attack_mask] *= self.direct_attack_alpha
+
+        return rate_of_spread
 
     def _update_with_new_locs(
         self,
@@ -619,8 +678,6 @@ class RothermelFireManager(FireManager):
         travel_distance = self.pixel_scale * np.sqrt(dx**2 + dy**2)
 
         # Check which candidate coordinates have passed their required threshold.
-        # This now distinguishes orthogonal and diagonal neighbors by using the
-        # source-to-destination grid distance in pixels scaled by `pixel_scale`.
         new_burn_mask = self.burn_amounts[y_coords, x_coords] > travel_distance
 
         # Keep only the candidates that are ready to ignite
@@ -687,6 +744,8 @@ class RothermelFireManager(FireManager):
         if game_screen is None:
             if self.terrain.image is not None:
                 background_image = pygame.surfarray.pixels3d(self.terrain.image).copy()
+            else:
+                raise ValueError("No game_screen provided and terrain.image is None")
         else:
             background_image = pygame.surfarray.pixels3d(game_screen).copy()
         background_image = background_image.swapaxes(1, 0)
@@ -720,7 +779,6 @@ class RothermelFireManager(FireManager):
 
         # If we've reached the end time, quit the sim
         if self.max_time is not None:
-            # Stop once the elapsed simulation time has reached the configured limit.
             if self.elapsed_time >= self.max_time:
                 return fire_map, GameStatus.QUIT
 
@@ -731,6 +789,8 @@ class RothermelFireManager(FireManager):
 
         # Sprites exist, but there are no new locations to spread to
         if len(all_params) == 0:
+            # Save the new elapsed_time value
+            self.elapsed_time += self.update_rate
             return fire_map, GameStatus.RUNNING
 
         [
@@ -784,14 +844,9 @@ class RothermelFireManager(FireManager):
         # Create a rate_of_spread variable that takes the same shape as self.burn_amounts
         # and fire_map.
         rate_of_spread = np.zeros_like(self.burn_amounts, dtype=np.float32)
-        # Accumulate contributions from all source->destination spread attempts.
-        # Equivalent to:
-        # for i in range(len(R)):
-        #     rate_of_spread[y_coords[i], x_coords[i]] += R[i]
         np.add.at(rate_of_spread, (y_coords, x_coords), R)
 
         # Update the burn_amounts dependent on if there are control lines there
-        # And only update if specified in the class
         self.rate_of_spread = self._update_rate_of_spread(rate_of_spread, fire_map)
         self.burn_amounts += self.rate_of_spread
 

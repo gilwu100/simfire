@@ -285,6 +285,8 @@ class FireSimulation(Simulation):
             self.environment,
             max_time=self.config.simulation.runtime,
             attenuate_line_ros=self.config.mitigation.ros_attenuation,
+            direct_attack_alpha=self.config.mitigation.direct_attack_alpha,
+            direct_attack_duration=self.config.mitigation.direct_attack_duration,
             headless=self.config.simulation.headless,
             diagonal_spread=self.config.fire.diagonal_spread,
         )
@@ -449,7 +451,7 @@ class FireSimulation(Simulation):
     def update_mitigation(self, points: Iterable[Tuple[int, int, int]]) -> None:
         """
         Update the `self.fire_map` with new mitigation points
-
+    
         Arguments:
             points: A list of `(column, row, mitigation)` tuples. These will be added to
                    `self.fire_map`.
@@ -457,7 +459,7 @@ class FireSimulation(Simulation):
         firelines = []
         scratchlines = []
         wetlines = []
-
+    
         # Loop through all points, and add the mitigations to their respective lists
         for i, (column, row, mitigation) in enumerate(points):
             if mitigation == BurnStatus.FIRELINE:
@@ -469,14 +471,29 @@ class FireSimulation(Simulation):
             else:
                 log.warning(
                     f"The mitigation,{mitigation}, provided at location[{i}] is "
-                    "not an available mitigation strategy... Skipping"
+                    "not an available map-based mitigation strategy... Skipping"
                 )
-
+    
         # Update the self.fire_map using the managers
         self.fire_map = self.fireline_manager.update(self.fire_map, firelines)
         self.fire_map = self.scratchline_manager.update(self.fire_map, scratchlines)
         self.fire_map = self.wetline_manager.update(self.fire_map, wetlines)
 
+
+    def update_direct_attack(
+        self,
+        points: Iterable[Tuple[int, int]],
+        duration: Optional[float] = None,
+    ) -> None:
+        """
+        Activate direct attack on the specified pixels for a limited duration.
+    
+        Arguments:
+            points: Iterable of (column, row) pixel coordinates
+            duration: Duration in minutes. If None, use the configured default.
+        """
+        self.fire_manager.activate_direct_attack(points, duration=duration)
+    
     def update_agent_positions(self, points: Iterable[Tuple[int, int, int]]) -> None:
         """
         Update the `self.agent_positions` with new agent positions
@@ -595,6 +612,7 @@ class FireSimulation(Simulation):
         else:
             for x, y in init_pos:
                 self.fire_map[y, x] = BurnStatus.BURNING
+
     def _create_agent_positions(self) -> None:
         """
         Resets the `self.agent_positions` attribute to entirely `0`
