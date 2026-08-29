@@ -14,15 +14,15 @@ documentation = "https://mitrefireline.github.io/simfire/"
 repository = "https://github.com/mitrefireline/simfire"
 
 [tool.poetry.dependencies]
-python = "~3.9"
+python = ">=3.11,<3.12"
 matplotlib = "^3.5.2"
 noise = "^1.2.2"
 numpy = "^1.22.4"
-Pillow = ">=9.1.1,<11.0.0"
+Pillow = ">=11.0.0,<12.0.0"
 pygame = "^2.1.2"
 PyYAML = "^6.0"
-reportlab = "^3.6.10"
-scikit-image = "^0.19.3"
+reportlab = ">=4.4,<5.0"
+scikit-image = "^0.24.0"
 svglib = "^1.3.0"
 rich = "^12.5.1"
 wurlitzer = "^3.0.2"
@@ -32,8 +32,9 @@ opencv-python = "^4.7.0.72"
 imagecodecs = "^2023.7.10"
 landfire = "^0.5.0"
 geotiff = "^0.2.10"
-geopandas = "^0.14.4"
+geopandas = "^1.0.0"
 geopy = "^2.4.1"
+numcodecs = "<0.16"
 
 [tool.poetry.group.coverage.dependencies]
 pytest-cov = "^3.0.0"
@@ -61,7 +62,7 @@ mypy = "0.991"
 
 [tool.black]
 line-length = 90
-target-version = ['py39']
+target-version = ['py311']
 
 [tool.mypy]
 ignore_missing_imports = true
