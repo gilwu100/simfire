@@ -18,9 +18,12 @@ KNOWN_ROTHERMEL_OUTPUT = [
     382.0360259132064,
 ]
 
+# Fireline intensity (BTU/ft-s) for the same inputs
+KNOWN_INTENSITY_OUTPUT = [21288.84] * 4 + [5715.28] * 4
+
 
 class TestRothermel(unittest.TestCase):
-    def test_compute_rate_of_spread(self) -> None:
+    def setUp(self) -> None:
         chaparral = Chaparral
         grass = TallGrass
         particle = FuelParticle()
@@ -77,7 +80,7 @@ class TestRothermel(unittest.TestCase):
         U = np.array(U, dtype=np.float32)
         U_dir = np.array(U_dir, dtype=np.float32)
 
-        R = compute_rate_of_spread(
+        self.inputs = (
             loc_x,
             loc_y,
             new_loc_x,
@@ -96,5 +99,24 @@ class TestRothermel(unittest.TestCase):
             slope_mag,
             slope_dir,
         )
+
+    def test_compute_rate_of_spread(self) -> None:
+        R = compute_rate_of_spread(*self.inputs)
         for i, r in enumerate(R.tolist()):
             self.assertAlmostEqual(r, KNOWN_ROTHERMEL_OUTPUT[i], places=2)
+
+    def test_compute_fireline_intensity(self) -> None:
+        """
+        Test that asking for the fireline intensity leaves the rate of spread
+        unchanged, and that the intensity is the fuel's heat per unit area times the
+        rate of spread
+        """
+        R, I_B = compute_rate_of_spread(*self.inputs, return_intensity=True)
+        for i, r in enumerate(R.tolist()):
+            self.assertAlmostEqual(r, KNOWN_ROTHERMEL_OUTPUT[i], places=2)
+        for i, intensity in enumerate(I_B.tolist()):
+            self.assertAlmostEqual(intensity, KNOWN_INTENSITY_OUTPUT[i], places=1)
+        # Same fuel, same heat per unit area
+        heat_per_area = I_B / R
+        np.testing.assert_allclose(heat_per_area[:4], heat_per_area[0], rtol=1e-6)
+        np.testing.assert_allclose(heat_per_area[4:], heat_per_area[4], rtol=1e-6)

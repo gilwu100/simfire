@@ -7,6 +7,7 @@ from ....game._tests import DummyFuelLayer, DummyTopographyLayer
 from ....game.managers.mitigation import FireLineManager
 from ....utils.config import Config
 from ....world.parameters import Environment, FuelParticle
+from ....world.suppression import BTU_PER_FT_S_TO_KW_PER_M, FT_PER_MIN_TO_M_PER_MIN
 from ...sprites import Fire, Terrain
 from ..fire import ConstantSpreadFireManager, FireManager, RothermelFireManager
 
@@ -120,46 +121,6 @@ class TestFireManager(unittest.TestCase):
                 "new location is BURNED"
             ),
         )
-
-    def test_update_rate_of_spread(self) -> None:
-        """
-        Test updating the rate of spread based on locations of control lines
-        """
-        fire_map = np.full(
-            self.config.area.screen_size,
-            BurnStatus.UNBURNED,
-        )
-        rate_of_spread = np.zeros_like(fire_map)
-
-        fireline_y_coords = [0, 0]
-        fireline_x_coords = [0, 1]
-        scratchline_y_coords = [0, 0]
-        scratchline_x_coords = [2, 3]
-        wetline_y_coords = [0, 0]
-        wetline_x_coords = [4, 5]
-
-        y_coords = [0, 0, 0, 0, 0, 0]
-        x_coords = [0, 1, 2, 3, 4, 5]
-
-        fire_map[fireline_y_coords, fireline_x_coords] = BurnStatus.FIRELINE
-        fire_map[scratchline_y_coords, scratchline_x_coords] = BurnStatus.SCRATCHLINE
-        fire_map[wetline_y_coords, wetline_x_coords] = BurnStatus.WETLINE
-        rate_of_spread[y_coords, x_coords] = 1
-
-        # First, test the True case
-        self.fire_manager.attenuate_line_ros = True
-        rate_of_spread_true = self.fire_manager._update_rate_of_spread(
-            rate_of_spread, fire_map
-        )
-        # Check to make sure that the rate of spread was changed to a smaller value
-        self.assertLess(np.sum(rate_of_spread_true), 5)
-
-        # Then, test the False case
-        self.fire_manager.attenuate_line_ros = False
-        rate_of_spread_false = self.fire_manager._update_rate_of_spread(
-            rate_of_spread, fire_map
-        )
-        self.assertEqual(np.sum(rate_of_spread_false), 0)
 
 
 class TestRothermelFireManager(unittest.TestCase):
@@ -322,6 +283,141 @@ class TestRothermelFireManager(unittest.TestCase):
                 max_time=self.config.simulation.runtime,
                 headless=self.headless,
             )
+
+    def test_update_rate_of_spread(self) -> None:
+        """
+        Test updating the rate of spread based on locations of control lines
+        """
+        fire_map = np.full(
+            self.config.area.screen_size,
+            BurnStatus.UNBURNED,
+        )
+        rate_of_spread = np.zeros_like(fire_map)
+
+        fireline_y_coords = [0, 0]
+        fireline_x_coords = [0, 1]
+        scratchline_y_coords = [0, 0]
+        scratchline_x_coords = [2, 3]
+        wetline_y_coords = [0, 0]
+        wetline_x_coords = [4, 5]
+
+        y_coords = [0, 0, 0, 0, 0, 0]
+        x_coords = [0, 1, 2, 3, 4, 5]
+
+        fire_map[fireline_y_coords, fireline_x_coords] = BurnStatus.FIRELINE
+        fire_map[scratchline_y_coords, scratchline_x_coords] = BurnStatus.SCRATCHLINE
+        fire_map[wetline_y_coords, wetline_x_coords] = BurnStatus.WETLINE
+        rate_of_spread[y_coords, x_coords] = 1
+
+        # First, test the True case
+        self.fire_manager.attenuate_line_ros = True
+        rate_of_spread_true = self.fire_manager._update_rate_of_spread(
+            rate_of_spread, fire_map
+        )
+        # Check to make sure that the rate of spread was changed to a smaller value
+        self.assertLess(np.sum(rate_of_spread_true), 5)
+
+        # Then, test the False case
+        self.fire_manager.attenuate_line_ros = False
+        rate_of_spread_false = self.fire_manager._update_rate_of_spread(
+            rate_of_spread, fire_map
+        )
+        self.assertEqual(np.sum(rate_of_spread_false), 0)
+
+    def test_direct_attack_default_alpha(self) -> None:
+        """
+        Test that a direct attack given neither alpha nor depth applies
+        `direct_attack_alpha` to its pixels until it expires, and that a second one
+        on the same pixel extends the effect without compounding it
+        """
+        self.fire_manager.direct_attack_alpha = 0.5
+        self.fire_manager.activate_direct_attack([(1, 2), (3, 4)], duration=20)
+        self.fire_manager.activate_direct_attack([(1, 2)], duration=30)
+
+        multiplier = self.fire_manager.get_direct_attack_multiplier()
+        self.assertEqual(multiplier[2, 1], 0.5)
+        self.assertEqual(multiplier[4, 3], 0.5)
+        self.assertEqual(np.sum(multiplier != 1), 2)
+        np.testing.assert_array_equal(
+            self.fire_manager.get_direct_attack_mask(), multiplier != 1
+        )
+
+        self.fire_manager.elapsed_time += 20
+        multiplier = self.fire_manager.get_direct_attack_multiplier()
+        self.assertEqual(multiplier[2, 1], 0.5)
+        self.assertEqual(multiplier[4, 3], 1)
+
+        self.fire_manager.elapsed_time += 10
+        multiplier = self.fire_manager.get_direct_attack_multiplier()
+        self.assertTrue(np.all(multiplier == 1))
+
+    def test_direct_attack_per_pixel_alpha(self) -> None:
+        """
+        Test that each pixel keeps its own alpha, that overlapping direct attacks
+        multiply, and that the overlap ends when the shorter one expires
+        """
+        self.fire_manager.activate_direct_attack(
+            [(1, 2), (3, 4)], duration=30, alpha=[0.2, 0.6]
+        )
+        self.fire_manager.activate_direct_attack([(1, 2)], duration=10, alpha=0.5)
+
+        multiplier = self.fire_manager.get_direct_attack_multiplier()
+        self.assertAlmostEqual(multiplier[2, 1], 0.1, places=6)
+        self.assertAlmostEqual(multiplier[4, 3], 0.6, places=6)
+
+        self.fire_manager.elapsed_time += 10
+        multiplier = self.fire_manager.get_direct_attack_multiplier()
+        self.assertAlmostEqual(multiplier[2, 1], 0.2, places=6)
+        self.assertEqual(len(self.fire_manager.direct_attacks), 1)
+
+        with self.assertRaises(ValueError):
+            self.fire_manager.activate_direct_attack([(1, 2)], alpha=1.5)
+        with self.assertRaises(ValueError):
+            self.fire_manager.activate_direct_attack([(1, 2)], alpha=0.5, depth_mm=1)
+
+    def test_direct_attack_depth(self) -> None:
+        """
+        Test that a direct attack given as a depth takes its alpha from the spread
+        rate, intensity, and fuel of each pixel (all Chaparral here, which needs
+        0.75 mm of water at 1,000 kW/m)
+        """
+        points = [(1, 2), (3, 4)]
+        self.fire_manager.activate_direct_attack(points, depth_mm=[1.0, 0.375])
+        rows, cols = [2, 4], [1, 3]
+        # 2 m/min and 1,000 kW/m in the manager's units
+        self.fire_manager.incoming_ros[rows, cols] = 2 / FT_PER_MIN_TO_M_PER_MIN
+        self.fire_manager.incoming_intensity[rows, cols] = 1000 / BTU_PER_FT_S_TO_KW_PER_M
+
+        multiplier = self.fire_manager.get_direct_attack_multiplier()
+        full = 0.38 * 2**-0.37
+        # 1.0 mm is more than the need, 0.375 mm is half of it
+        self.assertAlmostEqual(multiplier[2, 1], full, places=2)
+        self.assertAlmostEqual(multiplier[4, 3], full**0.5, places=2)
+
+        # Where the fire is not spreading in, the multiplier is 1
+        self.fire_manager.incoming_ros[rows, cols] = 0
+        multiplier = self.fire_manager.get_direct_attack_multiplier()
+        self.assertTrue(np.all(multiplier == 1))
+
+    def test_direct_attack_stops_spread(self) -> None:
+        """
+        Test that pixels under a direct attack with alpha 0 do not ignite while every
+        other neighbour of the initial fire does
+        """
+        fire_map = np.full(self.screen_size, BurnStatus.UNBURNED)
+        self.fire_manager.pixel_scale = 0
+        x, y = self.fire_init_pos
+        new_locs = self.fire_manager._get_new_locs(x, y, fire_map)
+        held = list(new_locs[:3])
+        self.fire_manager.activate_direct_attack(held, duration=60, alpha=0)
+
+        fire_map, _ = self.fire_manager.update(fire_map)
+        for col, row in new_locs:
+            with self.subTest(loc=(col, row)):
+                if (col, row) in held:
+                    self.assertEqual(fire_map[row, col], BurnStatus.UNBURNED)
+                else:
+                    self.assertEqual(fire_map[row, col], BurnStatus.BURNING)
 
     def test_update(self) -> None:
         """

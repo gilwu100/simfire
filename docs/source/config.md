@@ -88,6 +88,14 @@ The format to save the data of the simulation. Can by type: "npy", "h5".
 (`bool`)<br>
 Whether or not to attenuate rate of spread based on the type of line being used. These attenuation values can be seen in [`enums.py`](https://github.com/mitrefireline/simfire/blob/main/simfire/enums.py). These values will be subtracted from the rate of spread for a given pixel based on the control line type. If this value is set to `false`, all lines will completely stop a fire and the rate of spread for any pixel with a control line will be set to zero.
 
+#### direct_attack_alpha
+(`float`, default `1.0`)<br>
+The default rate-of-spread multiplier, between 0 and 1, of a direct attack (a water or retardant drop) placed with `FireSimulation.update_direct_attack`. The fire crosses a treated pixel at this fraction of its normal speed. It applies when the call gives neither `alpha` nor `depth_mm`. With `alpha`, each pixel gets the given multiplier (one value or one per pixel). With `depth_mm`, each pixel's multiplier is computed at every update from the depth it received and its own spread rate, fireline intensity, and fuel (see [`world/suppression.py`](https://github.com/gilwu100/simfire/blob/ALPHA_GRID/simfire/world/suppression.py)). Where drops overlap, their multipliers multiply.
+
+#### direct_attack_duration
+(`float`, default `20.0`)<br>
+The default number of minutes a direct attack stays active, used when `update_direct_attack` is called without `duration`.
+
 ---
 
 ### Operational Parameters

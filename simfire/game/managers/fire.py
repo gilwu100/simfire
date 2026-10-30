@@ -7,7 +7,7 @@ Defines the different `FireManager`s (`ConstantSpreadFireManager` and
 """
 
 import collections
-from dataclasses import astuple
+from dataclasses import astuple, dataclass
 from typing import Any, Iterable, List, Optional, Sequence, Tuple, Union
 
 import matplotlib.pyplot as plt
@@ -19,6 +19,12 @@ from ...utils.graph import FireSpreadGraph
 from ...utils.log import create_logger
 from ...world.parameters import Environment, FuelParticle
 from ...world.rothermel import compute_rate_of_spread
+from ...world.suppression import (
+    BTU_PER_FT_S_TO_KW_PER_M,
+    FT_PER_MIN_TO_M_PER_MIN,
+    cell_alpha,
+    fuel_group,
+)
 from ..sprites import Fire, Terrain
 
 log = create_logger(__name__)
@@ -26,6 +32,37 @@ log = create_logger(__name__)
 PointType = Tuple[int, int]
 InitPosType = Union[PointType, Sequence[PointType]]
 NewLocsType = Tuple[Tuple[int, int], ...]
+PerPointType = Union[float, Sequence[float], np.ndarray]
+
+
+@dataclass
+class DirectAttack:
+    """
+    One direct attack (one drop) on a set of pixels.
+
+    Parameters:
+        rows: Row of each pixel
+        cols: Column of each pixel
+        end_time: Simulation time (min) at which the effect ends
+        alpha: Fixed rate-of-spread multiplier of each pixel, or None if the
+               multiplier is computed from `depth_mm`
+        depth_mm: Depth of water or retardant each pixel received (mm), or None
+        fuel_groups: (need curve, coverage class) of each pixel, shape (n, 2), used
+                     with `depth_mm`
+        agent: "water" or "retardant", used with `depth_mm`
+        log_noise: Offset added to the log of the full-dose water multiplier, used
+                   with `depth_mm`
+    """
+
+    rows: np.ndarray
+    cols: np.ndarray
+    end_time: float
+    alpha: Optional[np.ndarray] = None
+    depth_mm: Optional[np.ndarray] = None
+    fuel_groups: Optional[np.ndarray] = None
+    agent: str = "water"
+    log_noise: float = 0.0
+
 
 SpriteParamsType = Tuple[
     List[int],
@@ -88,8 +125,10 @@ class FireManager:
                                 values found in `enums.RoSAttenuation` from the initial
                                 rate of spread calculation. If set to `False`, all
                                 different control lines will completely stop the fire.
-            direct_attack_alpha: scaling factor between 0 and 1 that models the effect
-                                 of a direct attack
+            direct_attack_alpha: Default rate-of-spread multiplier, between 0 and 1, of
+                                 a direct attack that is given neither `alpha` nor
+                                 `depth_mm` (see
+                                 `RothermelFireManager.activate_direct_attack`)
             direct_attack_duration: duration in minutes for which a direct attack
                                     remains active once applied
             headless: Flag to run in a headless state. This will allow PyGame objects to
@@ -342,8 +381,10 @@ class RothermelFireManager(FireManager):
                                 values found in `enums.RoSAttenuation` from the initial
                                 rate of spread calculation. If set to `False`, all
                                 different control lines will completely stop the fire.
-            direct_attack_alpha: scaling factor between 0 and 1 that models the effect
-                                 of a direct attack
+            direct_attack_alpha: Default rate-of-spread multiplier, between 0 and 1, of
+                                 a direct attack that is given neither `alpha` nor
+                                 `depth_mm` (see
+                                 `RothermelFireManager.activate_direct_attack`)
             direct_attack_duration: duration in minutes for which a direct attack
                                     remains active once applied
             headless: Flag to run in a headless state. This will allow PyGame objects to
@@ -388,6 +429,19 @@ class RothermelFireManager(FireManager):
         self.direct_attack_end_time = np.zeros(
             self.terrain.screen_size, dtype=np.float32
         )
+        # The same for direct attacks with the default multiplier only
+        self.default_attack_end_time = np.zeros(
+            self.terrain.screen_size, dtype=np.float32
+        )
+        # The direct attacks given an alpha or a depth that have not yet expired, each
+        # with its own multipliers
+        self.direct_attacks: List[DirectAttack] = []
+
+        # The fastest spread rate into each pixel on the latest update (ft/min), and the
+        # fireline intensity at that rate (BTU/ft-s), before any suppression. Direct
+        # attacks given as a depth read these to set their multipliers
+        self.incoming_ros = np.zeros(self.terrain.screen_size, dtype=np.float32)
+        self.incoming_intensity = np.zeros(self.terrain.screen_size, dtype=np.float32)
 
         # Pre-compute the slope magnitudes and directions for use with
         # Rothermel calculation
@@ -400,34 +454,134 @@ class RothermelFireManager(FireManager):
         self,
         points: Iterable[Tuple[int, int]],
         duration: Optional[float] = None,
+        alpha: Optional[PerPointType] = None,
+        depth_mm: Optional[PerPointType] = None,
+        agent: str = "water",
+        log_noise: float = 0.0,
     ) -> None:
         """
         Activate direct attack on the given points for the specified duration.
 
+        The rate of spread into each point is multiplied by its own alpha, set in one
+        of three ways:
+            - Neither `alpha` nor `depth_mm`: `self.direct_attack_alpha` on every point
+            - `alpha`: the given multiplier, one value for all points or one per point
+            - `depth_mm`: the depth of water or retardant each point received. The
+              multiplier is recomputed at every update from the point's own spread
+              rate, fireline intensity, and fuel with `world.suppression.cell_alpha`,
+              so it is set by the fire that actually arrives at the point
+
+        Where several active direct attacks with `alpha` or `depth_mm` cover a point,
+        their multipliers multiply. Direct attacks with the default multiplier do not
+        compound: a point under any of them is multiplied once by
+        `self.direct_attack_alpha` until the latest of them expires.
+
         Arguments:
             points: Iterable of (column, row) points
-            duration: Duration in minutes. If None, use self.direct_attack_duration
+            duration: Duration in minutes. If None, use self.direct_attack_duration.
+                      `float("inf")` keeps the effect to the end of the simulation
+            alpha: Multiplier between 0 and 1, a single value or one per point
+            depth_mm: Depth received (mm), a single value or one per point
+            agent: "water" or "retardant", used with `depth_mm`
+            log_noise: Offset added to the log of the full-dose water multiplier, used
+                       with `depth_mm` to draw the scatter of one drop
         """
+        if alpha is not None and depth_mm is not None:
+            raise ValueError("Give either alpha or depth_mm, not both")
+        if agent not in ("water", "retardant"):
+            raise ValueError(f"agent must be 'water' or 'retardant', not {agent}")
         if duration is None:
             duration = self.direct_attack_duration
 
         expire_time = self.elapsed_time + float(duration)
 
-        for col, row in points:
-            if (
-                0 <= row < self.direct_attack_end_time.shape[0]
-                and 0 <= col < self.direct_attack_end_time.shape[1]
-            ):
-                self.direct_attack_end_time[row, col] = max(
-                    self.direct_attack_end_time[row, col],
-                    expire_time,
-                )
+        cols, rows = np.asarray(list(points), dtype=int).reshape(-1, 2).T
+        values = depth_mm if alpha is None else alpha
+        if values is None:
+            values = self.direct_attack_alpha
+        values = np.broadcast_to(np.asarray(values, dtype=np.float32), rows.shape)
+        if alpha is not None and (np.any(values < 0) or np.any(values > 1)):
+            raise ValueError("alpha must be between 0 and 1")
+        if depth_mm is not None and np.any(values < 0):
+            raise ValueError("depth_mm must be nonnegative")
+
+        in_bounds = (
+            (rows >= 0)
+            & (rows < self.direct_attack_end_time.shape[0])
+            & (cols >= 0)
+            & (cols < self.direct_attack_end_time.shape[1])
+        )
+        rows, cols, values = rows[in_bounds], cols[in_bounds], values[in_bounds]
+        if rows.size == 0:
+            return
+
+        np.maximum.at(self.direct_attack_end_time, (rows, cols), expire_time)
+        if alpha is None and depth_mm is None:
+            np.maximum.at(self.default_attack_end_time, (rows, cols), expire_time)
+            return
+
+        if depth_mm is None:
+            attack = DirectAttack(rows, cols, expire_time, alpha=values)
+        else:
+            fuel_groups = np.array(
+                [fuel_group(fuel) for fuel in self.terrain.fuels[rows, cols]]
+            )
+            attack = DirectAttack(
+                rows,
+                cols,
+                expire_time,
+                depth_mm=values,
+                fuel_groups=fuel_groups,
+                agent=agent,
+                log_noise=float(log_noise),
+            )
+        self.direct_attacks.append(attack)
 
     def get_direct_attack_mask(self) -> np.ndarray:
         """
         Return a boolean mask indicating where direct attack is currently active.
         """
         return self.direct_attack_end_time > self.elapsed_time
+
+    def get_direct_attack_multiplier(self) -> np.ndarray:
+        """
+        Return the rate-of-spread multiplier of every pixel from the direct attacks
+        active at `self.elapsed_time`: 1 where there is none, `self.direct_attack_alpha`
+        where default direct attacks are active, times the product of the multipliers
+        of the active direct attacks given an alpha or a depth. Expired direct attacks
+        are dropped.
+
+        Direct attacks given as a depth use `self.incoming_ros` and
+        `self.incoming_intensity`, so their multiplier is 1 at pixels the fire is not
+        spreading into on the current update.
+
+        Returns:
+            The multiplier of every pixel, with shape `self.terrain.screen_size`
+        """
+        self.direct_attacks = [
+            attack
+            for attack in self.direct_attacks
+            if attack.end_time > self.elapsed_time
+        ]
+        multiplier = np.ones(self.terrain.screen_size, dtype=np.float32)
+        multiplier[self.default_attack_end_time > self.elapsed_time] = (
+            self.direct_attack_alpha
+        )
+        for attack in self.direct_attacks:
+            if attack.alpha is not None:
+                alpha = attack.alpha
+            else:
+                pixels = (attack.rows, attack.cols)
+                alpha = cell_alpha(
+                    self.incoming_ros[pixels] * FT_PER_MIN_TO_M_PER_MIN,
+                    self.incoming_intensity[pixels] * BTU_PER_FT_S_TO_KW_PER_M,
+                    attack.depth_mm,
+                    attack.fuel_groups,
+                    attack.agent,
+                    attack.log_noise,
+                )
+            np.multiply.at(multiplier, (attack.rows, attack.cols), alpha)
+        return multiplier
 
     def _get_environment_parameters(
         self, environment: Environment
@@ -610,8 +764,9 @@ class RothermelFireManager(FireManager):
         result of this function. If the subtraction would make the value negative,
         it is clamped to 0.
 
-        In addition, if direct attack is active on a pixel, the rate of spread into
-        that pixel is multiplied by `self.direct_attack_alpha`.
+        In addition, the rate of spread into every pixel is multiplied by its
+        direct-attack multiplier (`self.get_direct_attack_multiplier`), which is 1
+        where no direct attack is active.
 
         Arguments:
             rate_of_spread: The array that keeps track of the rate of spread for
@@ -644,8 +799,7 @@ class RothermelFireManager(FireManager):
             rate_of_spread[np.where(fire_map == BurnStatus.WETLINE)] = 0
 
         # Scale the rate of spread to model the effect of a direct attack
-        direct_attack_mask = self.get_direct_attack_mask()
-        rate_of_spread[direct_attack_mask] *= self.direct_attack_alpha
+        rate_of_spread = rate_of_spread * self.get_direct_attack_multiplier()
 
         return rate_of_spread
 
@@ -813,8 +967,8 @@ class RothermelFireManager(FireManager):
             slope_dir,
         ] = self._flatten_params(all_params)
 
-        # Compute the rate of spread with vectorized function
-        R = compute_rate_of_spread(
+        # Compute the rate of spread and fireline intensity with vectorized function
+        R, I_B = compute_rate_of_spread(
             loc_x,
             loc_y,
             new_loc_x,
@@ -832,14 +986,22 @@ class RothermelFireManager(FireManager):
             U_dir,
             slope_mag,
             slope_dir,
+            return_intensity=True,
         )
-
-        # Scale the rate of spread by the update rate
-        R *= self.update_rate
 
         # Create integer y_coords and x_coords
         y_coords = new_loc_y.astype(int)
         x_coords = new_loc_x.astype(int)
+
+        # Keep the fastest spread into each pixel and its intensity, for direct
+        # attacks given as a depth
+        self.incoming_ros = np.zeros(self.terrain.screen_size, dtype=np.float32)
+        self.incoming_intensity = np.zeros(self.terrain.screen_size, dtype=np.float32)
+        np.maximum.at(self.incoming_ros, (y_coords, x_coords), R)
+        np.maximum.at(self.incoming_intensity, (y_coords, x_coords), I_B)
+
+        # Scale the rate of spread by the update rate
+        R *= self.update_rate
 
         # Create a rate_of_spread variable that takes the same shape as self.burn_amounts
         # and fire_map.

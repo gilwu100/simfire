@@ -5,7 +5,7 @@ from abc import ABC, abstractmethod
 from datetime import datetime
 from enum import IntEnum
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
 import h5py
 import jsonlines
@@ -484,15 +484,37 @@ class FireSimulation(Simulation):
         self,
         points: Iterable[Tuple[int, int]],
         duration: Optional[float] = None,
+        alpha: Optional[Union[float, Sequence[float], np.ndarray]] = None,
+        depth_mm: Optional[Union[float, Sequence[float], np.ndarray]] = None,
+        agent: str = "water",
+        log_noise: float = 0.0,
     ) -> None:
         """
         Activate direct attack on the specified pixels for a limited duration.
-    
+
+        Each pixel gets its own rate-of-spread multiplier: the configured default if
+        neither `alpha` nor `depth_mm` is given, the given `alpha`, or a multiplier
+        computed from the depth each pixel received and the fire that reaches it. See
+        `RothermelFireManager.activate_direct_attack`.
+
         Arguments:
             points: Iterable of (column, row) pixel coordinates
             duration: Duration in minutes. If None, use the configured default.
+            alpha: Multiplier between 0 and 1, a single value or one per pixel
+            depth_mm: Depth of water or retardant received (mm), a single value or one
+                      per pixel
+            agent: "water" or "retardant", used with `depth_mm`
+            log_noise: Offset added to the log of the full-dose water multiplier, used
+                       with `depth_mm`
         """
-        self.fire_manager.activate_direct_attack(points, duration=duration)
+        self.fire_manager.activate_direct_attack(
+            points,
+            duration=duration,
+            alpha=alpha,
+            depth_mm=depth_mm,
+            agent=agent,
+            log_noise=log_noise,
+        )
     
     def update_agent_positions(self, points: Iterable[Tuple[int, int, int]]) -> None:
         """

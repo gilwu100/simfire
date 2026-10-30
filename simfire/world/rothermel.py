@@ -1,3 +1,5 @@
+from typing import Tuple, Union
+
 import numpy as np
 
 
@@ -19,7 +21,8 @@ def compute_rate_of_spread(
     U_dir: np.ndarray,
     slope_mag: np.ndarray,
     slope_dir: np.ndarray,
-) -> np.ndarray:
+    return_intensity: bool = False,
+) -> Union[np.ndarray, Tuple[np.ndarray, np.ndarray]]:
     """
     Compute the basic Rothermel rate of spread. All measurements are assumed to be in
     feet, minutes, and pounds, and BTU.
@@ -43,9 +46,11 @@ def compute_rate_of_spread(
         U: The envrionment wind speed
         U_dir: The envrionment wind direction (degrees clockwise from North)
         slope_dir: The angle of the steepest ascent at the location
+        return_intensity: Whether to also return Byram's fireline intensity
 
     Returns:
         R: The computed rate of spread in ft/min
+        I_B: Only if `return_intensity`, the fireline intensity in BTU/ft-s
     """
     # Retain the original number of values from the inputs
     orig_shape = w_0.shape
@@ -133,4 +138,13 @@ def compute_rate_of_spread(
     # Don't want negative values for R
     R = np.maximum(R, np.zeros_like(R))
 
-    return R
+    if not return_intensity:
+        return R
+
+    # Fireline intensity (BTU/ft-s): heat per unit area I_R * t_r, with residence time
+    # t_r = 384 / sigma minutes (Anderson 1969, via Albini 1976), times R, over 60 s
+    H_A = np.zeros(orig_shape)
+    H_A[w_0_idxs_non_zero] = I_R * 384 / sigma
+    I_B = H_A * R / 60
+
+    return R, I_B
