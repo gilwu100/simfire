@@ -399,6 +399,33 @@ class TestRothermelFireManager(unittest.TestCase):
         multiplier = self.fire_manager.get_direct_attack_multiplier()
         self.assertTrue(np.all(multiplier == 1))
 
+    def test_direct_attack_depths_add(self) -> None:
+        """
+        Test that overlapping drops given as a depth add their depths before the cap,
+        so a second full load changes nothing and two half loads act as one full load,
+        while water and retardant on the same pixel multiply
+        """
+        rows, cols = [2, 4, 6], [1, 3, 5]
+        self.fire_manager.incoming_ros[rows, cols] = 2 / FT_PER_MIN_TO_M_PER_MIN
+        self.fire_manager.incoming_intensity[rows, cols] = 1000 / BTU_PER_FT_S_TO_KW_PER_M
+        full = 0.38 * 2**-0.37
+
+        # Chaparral needs 0.75 mm here: two full loads, then two half loads
+        self.fire_manager.activate_direct_attack([(1, 2)], depth_mm=1.0)
+        self.fire_manager.activate_direct_attack([(1, 2)], depth_mm=1.0)
+        self.fire_manager.activate_direct_attack([(3, 4)], depth_mm=0.375)
+        self.fire_manager.activate_direct_attack([(3, 4)], depth_mm=0.375)
+        # Water and retardant (coverage 2.44 mm for chaparral) on one pixel
+        self.fire_manager.activate_direct_attack([(5, 6)], depth_mm=1.0)
+        self.fire_manager.activate_direct_attack(
+            [(5, 6)], depth_mm=2.44, agent="retardant"
+        )
+
+        multiplier = self.fire_manager.get_direct_attack_multiplier()
+        self.assertAlmostEqual(multiplier[2, 1], full, places=2)
+        self.assertAlmostEqual(multiplier[4, 3], full, places=2)
+        self.assertAlmostEqual(multiplier[6, 5], full * 0.05, places=3)
+
     def test_direct_attack_stops_spread(self) -> None:
         """
         Test that pixels under a direct attack with alpha 0 do not ignite while every

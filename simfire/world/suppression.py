@@ -162,7 +162,7 @@ def fuel_group(fuel: Fuel) -> Tuple[str, str]:
 
 
 def alpha_full_dose(
-    ros_m_per_min: ArrayLike, agent: str = "water", log_noise: float = 0.0
+    ros_m_per_min: ArrayLike, agent: str = "water", log_noise: ArrayLike = 0.0
 ) -> np.ndarray:
     """
     The multiplier of a pixel that received at least the depth it needs.
@@ -171,7 +171,8 @@ def alpha_full_dose(
         ros_m_per_min: Spread rate of the pixel without the drop (m/min)
         agent: "water" or "retardant"
         log_noise: Offset added to ln(alpha) for water, one draw per drop to carry the
-                   scatter of the measurements (log sd 0.7 per drop in the demo)
+                   scatter of the measurements (log sd 0.7 per drop in the demo), a
+                   single value or one per pixel
 
     Returns:
         The full-dose multiplier, between 0 and 1
@@ -220,7 +221,7 @@ def cell_alpha(
     depth_mm: ArrayLike,
     fuel_groups: np.ndarray,
     agent: str = "water",
-    log_noise: float = 0.0,
+    log_noise: ArrayLike = 0.0,
 ) -> np.ndarray:
     """
     The multiplier of each pixel of a drop, alpha_full(R) ** min(x / X_REF, 1).

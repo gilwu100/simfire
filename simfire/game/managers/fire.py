@@ -471,10 +471,13 @@ class RothermelFireManager(FireManager):
               rate, fireline intensity, and fuel with `world.suppression.cell_alpha`,
               so it is set by the fire that actually arrives at the point
 
-        Where several active direct attacks with `alpha` or `depth_mm` cover a point,
-        their multipliers multiply. Direct attacks with the default multiplier do not
-        compound: a point under any of them is multiplied once by
-        `self.direct_attack_alpha` until the latest of them expires.
+        Where several active direct attacks given a depth of the same agent cover a
+        point, their depths add before the multiplier is computed, so water beyond
+        the depth the point needs adds nothing. Multipliers from direct attacks given
+        an `alpha`, and from water and retardant on the same point, multiply. Direct
+        attacks with the default multiplier do not compound: a point under any of them
+        is multiplied once by `self.direct_attack_alpha` until the latest of them
+        expires.
 
         Arguments:
             points: Iterable of (column, row) points
@@ -484,7 +487,9 @@ class RothermelFireManager(FireManager):
             depth_mm: Depth received (mm), a single value or one per point
             agent: "water" or "retardant", used with `depth_mm`
             log_noise: Offset added to the log of the full-dose water multiplier, used
-                       with `depth_mm` to draw the scatter of one drop
+                       with `depth_mm` to draw the scatter of one drop. Where drops
+                       overlap, their offsets are averaged with their depths as
+                       weights
         """
         if alpha is not None and depth_mm is not None:
             raise ValueError("Give either alpha or depth_mm, not both")
@@ -548,8 +553,8 @@ class RothermelFireManager(FireManager):
         Return the rate-of-spread multiplier of every pixel from the direct attacks
         active at `self.elapsed_time`: 1 where there is none, `self.direct_attack_alpha`
         where default direct attacks are active, times the product of the multipliers
-        of the active direct attacks given an alpha or a depth. Expired direct attacks
-        are dropped.
+        of the active direct attacks given an alpha, times the multiplier from the
+        summed depth of water and of retardant. Expired direct attacks are dropped.
 
         Direct attacks given as a depth use `self.incoming_ros` and
         `self.incoming_intensity`, so their multiplier is 1 at pixels the fire is not
@@ -569,19 +574,58 @@ class RothermelFireManager(FireManager):
         )
         for attack in self.direct_attacks:
             if attack.alpha is not None:
-                alpha = attack.alpha
-            else:
-                pixels = (attack.rows, attack.cols)
-                alpha = cell_alpha(
-                    self.incoming_ros[pixels] * FT_PER_MIN_TO_M_PER_MIN,
-                    self.incoming_intensity[pixels] * BTU_PER_FT_S_TO_KW_PER_M,
-                    attack.depth_mm,
-                    attack.fuel_groups,
-                    attack.agent,
-                    attack.log_noise,
-                )
-            np.multiply.at(multiplier, (attack.rows, attack.cols), alpha)
+                np.multiply.at(multiplier, (attack.rows, attack.cols), attack.alpha)
+        for agent in ("water", "retardant"):
+            self._apply_depth_attacks(multiplier, agent)
         return multiplier
+
+    def _apply_depth_attacks(self, multiplier: np.ndarray, agent: str) -> None:
+        """
+        Multiply `multiplier` in place by the multiplier of every pixel under active
+        direct attacks given a depth of `agent`. The depths of overlapping drops are
+        added first, and their log-noise offsets averaged with the depths as weights.
+
+        Arguments:
+            multiplier: The multiplier of every pixel, updated in place
+            agent: "water" or "retardant"
+        """
+        attacks = [
+            attack
+            for attack in self.direct_attacks
+            if attack.depth_mm is not None and attack.agent == agent
+        ]
+        if len(attacks) == 0:
+            return
+
+        rows = np.concatenate([attack.rows for attack in attacks])
+        cols = np.concatenate([attack.cols for attack in attacks])
+        depth = np.concatenate([attack.depth_mm for attack in attacks])
+        noise = np.concatenate(
+            [np.full(attack.rows.size, attack.log_noise) for attack in attacks]
+        )
+        fuel_groups = np.concatenate([attack.fuel_groups for attack in attacks])
+
+        # One entry per pixel: summed depth and depth-weighted noise
+        flat = np.ravel_multi_index((rows, cols), multiplier.shape)
+        pixels, first, inverse = np.unique(flat, return_index=True, return_inverse=True)
+        total_depth = np.bincount(inverse, weights=depth)
+        total_noise = np.bincount(inverse, weights=depth * noise)
+        mean_noise = np.divide(
+            total_noise,
+            total_depth,
+            out=np.zeros_like(total_noise),
+            where=total_depth > 0,
+        )
+
+        pixels = np.unravel_index(pixels, multiplier.shape)
+        multiplier[pixels] *= cell_alpha(
+            self.incoming_ros[pixels] * FT_PER_MIN_TO_M_PER_MIN,
+            self.incoming_intensity[pixels] * BTU_PER_FT_S_TO_KW_PER_M,
+            total_depth,
+            fuel_groups[first],
+            agent,
+            mean_noise,
+        )
 
     def _get_environment_parameters(
         self, environment: Environment
