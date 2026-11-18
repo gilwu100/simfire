@@ -515,6 +515,14 @@ class FireSimulation(Simulation):
                     headless=self.config.simulation.headless,
                 )
 
+    def get_water_suppression_remaining(self) -> np.ndarray:
+        """Return the remaining direct-attack duration at each cell, in minutes."""
+        remaining = (
+            self.fire_manager.direct_attack_end_time
+            - self.fire_manager.elapsed_time
+        )
+        return np.maximum(remaining, 0.0)
+
     def run(self, time: Union[str, int]) -> Tuple[np.ndarray, bool]:
         """
         Runs the simulation with or without mitigation lines.
